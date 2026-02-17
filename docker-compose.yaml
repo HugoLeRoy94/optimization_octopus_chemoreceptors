@@ -1,0 +1,16 @@
+services:
+  jupyter-gpu:
+    build: .                          # Tells Docker to look for 'Dockerfile' in the current folder
+    container_name: pytorch_notebook
+    ports:
+      - "8888:8888"
+    volumes:
+      - ./unit_test:/app/unit_test/
+      - ./data:/app/data
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
