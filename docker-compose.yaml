@@ -9,7 +9,9 @@ services:
     volumes:
       - ./unit_test:/app/unit_test/:z
       - ./data:/app/data:z
-      - ./src:/src/src:ro,z
+      - ./src:/app/src:ro,z
+      - ./objectives:/app/objectives:ro,z
+      - ./run:/app/run:z
     deploy:
       resources:
         reservations:

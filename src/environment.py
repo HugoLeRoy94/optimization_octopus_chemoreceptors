@@ -2,112 +2,97 @@ import torch
 import torch.nn as nn
 import torch.distributions as dist
 from typing import Tuple
+from abc import ABC, abstractmethod
+
+class ConcentrationModel(nn.Module, ABC):
+    """
+    Abstract Base Class for different concentration strategies.
+    Subclass this to create LogNormal, Normal, Bimodal, etc.
+    """
+    @abstractmethod
+    def sample(self, batch_size: int, family_ids: torch.Tensor) -> torch.Tensor:
+        """
+        Returns concentrations for the given family_ids.
+        Shape: (batch_size,)
+        """
+        pass
+
+class LogNormalConcentration(ConcentrationModel):
+    """
+    Classic Biophysics assumption: c spans orders of magnitude.
+    log10(c) ~ Normal(mu, sigma)
+    """
+    def __init__(self, n_families: int, init_mean=-6.0, init_scale=1.0):
+        super().__init__()
+        # Initialize around 10^-6 M (1 microM)
+        self.mu = nn.Parameter(torch.ones(n_families) * init_mean)
+        self.log_sigma = nn.Parameter(torch.ones(n_families) * torch.log(torch.tensor(init_scale)))
+
+    def sample(self, batch_size, family_ids):
+        # Gather params for this batch
+        batch_mu = self.mu[family_ids]
+        batch_sigma = torch.exp(self.log_sigma[family_ids])
+        
+        # Sample Log-Space
+        dist_log = dist.Normal(batch_mu, batch_sigma)
+        log_c = dist_log.rsample()
+        
+        # Convert to Real-Space
+        return torch.pow(10.0, log_c)
+
+class NormalConcentration(ConcentrationModel):
+    """
+    Simple Gaussian assumption.
+    c ~ Normal(mu, sigma) clamped at 0.
+    """
+    def __init__(self, n_families: int, init_mean=5.0, init_scale=1.0):
+        super().__init__()
+        self.mu = nn.Parameter(torch.ones(n_families) * init_mean)
+        self.log_sigma = nn.Parameter(torch.ones(n_families) * torch.log(torch.tensor(init_scale)))
+
+    def sample(self, batch_size, family_ids):
+        batch_mu = self.mu[family_ids]
+        batch_sigma = torch.exp(self.log_sigma[family_ids])
+        
+        c = dist.Normal(batch_mu, batch_sigma).rsample()
+        return torch.clamp(c, min=1e-6) # Physics constraint
 
 class LigandEnvironment(nn.Module):
-    """
-    The Environment Module.
-    
-    Responsibilities:
-    1. Holds the learnable parameters (M and Sigma) for Unit-Ligand interactions.
-    2. Holds the learnable parameters for Ligand Concentrations.
-    3. Implements the 'Reparameterization Trick' to allow gradients to flow
-       through random sampling.
-    """
-    def __init__(self, n_units: int, n_families: int):
+    def __init__(self, n_units: int, n_families: int, conc_model: ConcentrationModel):
+        """
+        Args:
+            n_units: Number of protein units
+            n_families: Number of ligand families
+            conc_model: An INSTANCE of a ConcentrationModel subclass
+        """
         super().__init__()
         self.n_units = n_units
         self.n_families = n_families
         
-        # ======================================================================
-        # 1. INTERACTION PARAMETERS (The Physics)
-        # ======================================================================
-        # We store Mu and Sigma for Open (0) and Closed (1) states.
-        # Shape: (n_units, n_families, 2)
+        # 1. Inject the Concentration Strategy
+        self.concentration_model = conc_model
         
-        # Initialize Mean Energies (Mu) randomly between -5 and +5 kT
-        self.interaction_mu = nn.Parameter(
-            torch.randn(n_units, n_families, 2) * 2.0
-        )
-        
-        # Initialize Std Devs (Sigma). 
-        # We store 'log_sigma' to ensure sigma is always positive when we exponentiate it.
-        # This is a common numerical stability trick in ML.
-        self.interaction_log_sigma = nn.Parameter(
-            torch.randn(n_units, n_families, 2) - 1.0 # Start with small noise
-        )
+        # 2. Interaction Parameters (Standard MWC stuff)
+        self.interaction_mu = nn.Parameter(torch.randn(n_units, n_families, 2) * 2.0)
+        self.interaction_log_sigma = nn.Parameter(torch.randn(n_units, n_families, 2) - 1.0)
 
-        # ======================================================================
-        # 2. CONCENTRATION PARAMETERS (The Ecology)
-        # ======================================================================
-        # We assume Log-Normal distribution for concentrations.
-        # log10(c) ~ Normal(mu_c, sigma_c)
-        
-        self.conc_mu = nn.Parameter(
-            torch.zeros(n_families).uniform_(-9.0, -3.0) # 1nM to 1mM
-        )
-        self.conc_log_sigma = nn.Parameter(
-             torch.zeros(n_families).uniform_(-1.0, 0.0) # Small spread
-        )
-
-    def sample_batch(self, batch_size: int) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        """
-        The Forward Pass for the Environment.
-        
-        Returns:
-            energies: (batch_size, n_units, 2) - Sampled Interaction Energies
-            concentrations: (batch_size,)      - Sampled Ligand Concentrations
-            family_ids: (batch_size,)          - The identity of the ligand family
-        """
+    def sample_batch(self, batch_size: int):
         device = self.interaction_mu.device
         
-        # ----------------------------------------------------------------------
-        # A. Sample Ligand Identities
-        # ----------------------------------------------------------------------
-        # Randomly select which families appear in this batch
+        # A. Sample Family IDs
         family_ids = torch.randint(0, self.n_families, (batch_size,), device=device)
         
-        # ----------------------------------------------------------------------
-        # B. Sample Concentrations (Reparameterization Trick 1)
-        # ----------------------------------------------------------------------
-        # 1. Get parameters for the chosen families
-        # shape: (batch_size,)
-        batch_mu_c = self.conc_mu[family_ids]
-        batch_sigma_c = torch.exp(self.conc_log_sigma[family_ids])
+        # B. Delegate Concentration Sampling
+        concentrations = self.concentration_model.sample(batch_size, family_ids)
         
-        # 2. Create a Normal distribution and sample with gradients enabled (rsample)
-        # rsample() automatically does: mu + sigma * epsilon
-        conc_dist = dist.Normal(batch_mu_c, batch_sigma_c)
-        log_conc = conc_dist.rsample() 
+        # C. Sample Energies (Standard Reparameterization)
+        # (Same logic as before...)
+        mu_T = self.interaction_mu.permute(1, 0, 2)
+        sigma_T = torch.exp(self.interaction_log_sigma.permute(1, 0, 2))
         
-        concentrations = torch.pow(10.0, log_conc)
+        batch_mus = mu_T[family_ids]
+        batch_sigmas = sigma_T[family_ids]
         
-        # ----------------------------------------------------------------------
-        # C. Sample Interaction Energies (Reparameterization Trick 2)
-        # ----------------------------------------------------------------------
-        # 1. Extract params for the chosen families
-        # We need shape: (batch_size, n_units, 2)
-        # self.interaction_mu shape is (n_units, n_families, 2)
-        # We transpose to (n_families, n_units, 2) to index easily
+        energies = dist.Normal(batch_mus, batch_sigmas).rsample()
         
-        mu_transposed = self.interaction_mu.permute(1, 0, 2)
-        sigma_transposed = torch.exp(self.interaction_log_sigma.permute(1, 0, 2))
-        
-        # Select specific families
-        batch_mus = mu_transposed[family_ids]       # (batch, units, 2)
-        batch_sigmas = sigma_transposed[family_ids] # (batch, units, 2)
-        
-        # 2. Sample Energies
-        energy_dist = dist.Normal(batch_mus, batch_sigmas)
-        energies = energy_dist.rsample()
-        
-        # Return format: 
-        # energies: (batch, units, 2)
-        # conc: (batch,)
         return energies, concentrations, family_ids
-
-    def get_covariance_loss_term(self):
-        """
-        Optional helper: You might want to regularize Sigma later 
-        to prevent it from collapsing to zero or exploding.
-        """
-        return torch.exp(self.interaction_log_sigma).mean()

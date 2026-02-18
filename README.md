@@ -35,6 +35,7 @@
     ```bash
     sudo docker-compose stop     # Pauses the containers (keeps state)
     sudo docker-compose down     # Stops and removes containers/networks (Clean slate)
+    docker-compose up -d         # update the container, if I just changed the docker-compose file
     ```
 
 * **Kill/Remove Containers (Fix Conflicts):**
@@ -57,6 +58,7 @@
 * **Specify IDE (If it opens browser):**
     ```bash
     devpod up . --ide codium    # Forces VSCodium to open
+    devpod up . --recreate      # Remake the workspace, if docker-compose has been changed for instance
     ```
 
 * **Manage Workspaces:**

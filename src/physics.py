@@ -1,8 +1,7 @@
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 
-class MWCReceptorLayer(nn.Module):
+class Receptor(nn.Module):
     """
     The Physics Module.
     
