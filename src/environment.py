@@ -93,6 +93,9 @@ class LigandEnvironment(nn.Module):
         batch_mus = mu_T[family_ids]
         batch_sigmas = sigma_T[family_ids]
         
+        # energies[:,:,0] = E_open
+        # energies[:,:,1] = E_close
+        
         energies = dist.Normal(batch_mus, batch_sigmas).rsample()
         
         return energies, concentrations, family_ids
