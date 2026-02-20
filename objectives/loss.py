@@ -1,5 +1,6 @@
 import torch
 import torch.nn as nn
+import math
 
 class InformationLoss(nn.Module):
     """
@@ -33,50 +34,56 @@ class InformationLoss(nn.Module):
         """
         # Shapes
         B, R = activity.shape
-        
-        # 1. Compute Bandwidth (h) per receptor using Silverman's Rule
-        # h = 1.06 * sigma * B^(-1/5)
-        std = activity.std(dim=0) # (R,)
-        
-        # Stability: If a receptor is dead (std=0), fix h to a small value to avoid NaN
-        h = self.bandwidth_factor * std * (B ** (-0.2))
-        h = torch.clamp(h, min=1e-4) # Avoid division by zero
-        
-        # 2. Vectorized KDE
-        # We need to calculate the distance between every sample i and every sample j
-        # for a specific receptor r.
-        
-        # Expand dims for broadcasting:
-        # X: (B, 1, R)
-        # Y: (1, B, R)
-        X = activity.unsqueeze(1)
-        Y = activity.unsqueeze(0)
-        
-        # Differences: (B, B, R)
-        diff = X - Y
-        
-        # Gaussian Kernel: K(u) = (1/sqrt(2pi)) * exp(-0.5 * u^2)
-        # u = diff / h
-        # We perform this for all R receptors in parallel
-        
-        # h_reshaped: (1, 1, R)
-        h_reshaped = h.view(1, 1, R)
-        
-        u = diff / h_reshaped
-        kernel_values = torch.exp(-0.5 * u**2) / (2.506628) # 2.506... is sqrt(2*pi)
-        
-        # Density Estimate p(x): Sum over the neighbor batch dimension (dim 1)
-        # p(x_i) = (1 / (B*h)) * Sum_j K(u_ij)
-        # Sum over j (dim 1) -> Result (B, R)
-        density = kernel_values.sum(dim=1) / (B * h_reshaped.squeeze())
-        
+        # 1 compute the kernel density estimator (B,R)
+        density = self._compute_kde(samples=activity,query_points=activity)
         # 3. Entropy H = - E[log p(x)]
         # We average log(density) over the batch dimension
         log_prob = torch.log(density + 1e-8) # Add epsilon for stability
         entropy = -torch.mean(log_prob, dim=0)
         
         return entropy
-
+    def _compute_kde(self, samples: torch.Tensor, query_points: torch.Tensor) -> torch.Tensor:
+        """
+        Computes the Kernel Density Estimation of the samples, evaluated at query_points.
+        
+        Args:
+            samples: (B_samples, R) - The data defining the centers of our Gaussian kernels.
+            query_points: (B_query, R) - The points where we want to know the density.
+            
+        Returns:
+            density: (B_query, R) - The estimated probability density at each query point.
+        """
+        B_samples, R = samples.shape
+        
+        # 1. Compute Bandwidth (h) based purely on the *samples*
+        std = samples.std(dim=0) # (R,)
+        h = self.bandwidth_factor * std * (B_samples ** (-0.2))
+        h = torch.clamp(h, min=1e-4) # Safety clamp to prevent division by zero
+        
+        # 2. Broadcasting Setup
+        # We need pairwise differences between every query_point and every sample.
+        # X shape: (B_query, 1, R)
+        X = query_points.unsqueeze(1)
+        
+        # Y shape: (1, B_samples, R)
+        Y = samples.unsqueeze(0)
+        
+        # diff shape: (B_query, B_samples, R)
+        diff = X - Y
+        
+        # 3. Apply Gaussian Kernel
+        h_reshaped = h.view(1, 1, R)
+        u = diff / h_reshaped
+        
+        # K(u) = (1 / sqrt(2*pi)) * exp(-0.5 * u^2)
+        norm_factor = math.sqrt(2 * math.pi)
+        kernel_values = torch.exp(-0.5 * u**2) / norm_factor
+        
+        # 4. Sum over the samples to get the final density
+        # Average over dim 1 (the samples dimension)
+        density = kernel_values.sum(dim=1) / (B_samples * h_reshaped.squeeze(0))
+        
+        return density
     def _compute_covariance_penalty(self, activity: torch.Tensor) -> torch.Tensor:
         """
         Computes the sum of squared off-diagonal elements of the covariance matrix.
