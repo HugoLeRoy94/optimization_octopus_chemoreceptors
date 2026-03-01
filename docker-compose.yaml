@@ -12,6 +12,7 @@ services:
       - ./src:/app/src:ro,z
       - ./objectives:/app/objectives:ro,z
       - ./run:/app/run:z
+      - ./analysis:/app/analysis:z
     deploy:
       resources:
         reservations:

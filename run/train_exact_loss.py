@@ -11,22 +11,22 @@ from src.environment import *
 from src.physics import *
 from objectives.loss import ProxyInformationLoss,ExactInformationLoss
 from src.geometry import generate_receptor_indices
-from src.plot_helper import *
 from src.IO import ExperimentLogger
 
 # output class
-logger = ExperimentLogger(base_path="/app/data/",experiment_name="homo_2")
+
 checkpoints = False
 CONF = {
         "n_units": 2,
-        "n_families": 2,
+        "n_families": 100,
         "k_sub": 5,
-        "batch_size": 512,
-        "epochs": 1000,
+        "batch_size": 2**12,
+        "epochs": 10000,
         "lr": 0.05,
         "k_knn":5,
         "bandwidth_factor": 1.06
     }
+logger = ExperimentLogger(base_path="/app/data/",experiment_name="batch_"+str(CONF["batch_size"]))
 logger.save_config(CONF)
 
 # 1. SETUP
@@ -46,7 +46,6 @@ loss_fn = ExactInformationLoss(k_knn=CONF['k_knn']) # Default bandwidth
 #receptor_indices = torch.zeros(1, CONF["k_sub"], dtype=torch.long, device=device)
 #receptor_indices = generate_receptor_indices(n_units=CONF['n_units'],k_sub= CONF['k_sub'],n_sensors=2)
 receptor_indices = torch.tensor([[0,0,0,0,0],[1,1,1,1,1]],dtype=torch.long)
-print(receptor_indices)
 
 # Optimizer
 optimizer = optim.Adam(list(env.parameters()) + list(physics.parameters()), lr=CONF["lr"])
