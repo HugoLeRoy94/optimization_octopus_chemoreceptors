@@ -234,3 +234,70 @@ def evaluate_model(env,physics,receptor_indices,loss_fn,n_samples=2000,k_knn = 5
 
     return loss_fn.compute_knn_joint_entropy(activity,k = k_knn)
 
+
+@torch.no_grad()
+def plot_latent_radar_chart(env, unit_indices, family_names=None):
+    """
+    Creates a radar chart (spider plot) showing the relative binding 
+    strength of specific receptor units across all ligand families.
+    
+    Args:
+        env: Your initialized LigandEnvironment.
+        unit_indices: List of integers representing which units to plot (e.g., [0, 5, 12]).
+        family_names: Optional list of strings for the axes labels.
+    """
+    # 1. Extract the latent vectors
+    # Shape: (N_units_to_plot, latent_dim)
+    v_u = env.unit_latent[unit_indices].cpu() 
+    # Shape: (N_families, latent_dim)
+    v_f = env.family_latent.cpu()             
+
+    n_families = env.n_families
+    
+    # 2. Compute the Squared Distances
+    diff = v_u.unsqueeze(1) - v_f.unsqueeze(0)
+    dist_sq = (diff ** 2).sum(dim=-1).numpy() # Shape: (N_units_to_plot, n_families)
+    
+    # 3. Convert Distance to "Affinity Score" for Visualization
+    # We invert it so closer distance = higher peak on the radar chart.
+    # We subtract from the max distance in the batch to normalize the visual baseline to 0.
+    max_dist = np.max(dist_sq)
+    affinity_scores = max_dist - dist_sq 
+
+    # 4. Setup Radar Chart Angles
+    if family_names is None:
+        family_names = [f"Fam {i}" for i in range(n_families)]
+        
+    angles = np.linspace(0, 2 * np.pi, n_families, endpoint=False).tolist()
+    # Close the loop for plotting
+    angles += angles[:1] 
+    
+    # 5. Plotting
+    fig, ax = plt.subplots(figsize=(4, 3), subplot_kw=dict(polar=True))
+    
+    # Rotate so the first axis is at the top
+    ax.set_theta_offset(np.pi / 2)
+    ax.set_theta_direction(-1)
+    
+    # Draw one axis per family and add labels
+    ax.set_xticks(angles[:-1])
+    ax.set_xticklabels(family_names, fontsize=10)
+    
+    # Hide the radial y-ticks to keep it clean like Fig E
+    ax.set_yticks([]) 
+    
+    colors = plt.cm.tab10.colors
+    
+    # Plot each unit's polygon
+    for i, u_idx in enumerate(unit_indices):
+        values = affinity_scores[i].tolist()
+        values += values[:1] # Close the loop
+        
+        c = colors[i % len(colors)]
+        ax.plot(angles, values, linewidth=2, color=c, label=f"Unit {u_idx}")
+        ax.fill(angles, values, color=c, alpha=0.15)
+        
+    plt.legend(loc='upper right', bbox_to_anchor=(1.3, 1.1))
+    plt.title("Unit Affinity Profile (Latent Space)", y=1.08, fontweight='bold')
+    plt.tight_layout()
+    return fig,ax

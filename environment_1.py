@@ -145,74 +145,50 @@ class NormalConcentration(ConcentrationModel):
         return c_sweep, pdf
 
 class LigandEnvironment(nn.Module):
-    def __init__(self, n_units: int, n_families: int, conc_model: ConcentrationModel, 
-                 sigma_init=1.0, delta_shift=4.0, latent_dim=3):
+    def __init__(self, n_units: int, n_families: int, conc_model: ConcentrationModel, sigma_init=1.0, delta_shift=4.0):
         """
         Args:
             n_units: Number of protein units
             n_families: Number of ligand families
             conc_model: An INSTANCE of a ConcentrationModel subclass
-            sigma_init: Spread of the initial affinities
+            sigma_init: Spread of the initial affinities around the mean concentration
             delta_shift: Energy penalty for the closed state to ensure Kc > Ko
-            latent_dim: Dimensionality of the chemical latent space (trade-off space)
         """
         super().__init__()
         self.n_units = n_units
         self.n_families = n_families
-        self.latent_dim = latent_dim
         
         # 1. Inject the Concentration Strategy
         self.concentration_model = conc_model
         
         # ----------------------------------------------------------------------
-        # CHEMICAL LATENT SPACE INITIALIZATION
+        # SMART INITIALIZATION
         # ----------------------------------------------------------------------
+        # 1. Get the expected natural log concentration for each family
+        # Shape: (n_families,)
+        expected_log_c = self.concentration_model.get_expected_log_c()
         
-        # Embeddings for units and families. A smaller distance = stronger binding.
-        self.unit_latent = nn.Parameter(torch.randn(n_units, latent_dim))
-        # Create the tensor and normalize it to the unit hypersphere
-        fixed_families = torch.randn(n_families, latent_dim)
-        fixed_families = torch.nn.functional.normalize(fixed_families, p=2, dim=1)
-        # Register it correctly as a buffer
-        self.register_buffer('family_latent', fixed_families)
+        # 2. Initialize Open-State Energies (mu_open)
+        # Center them around expected_log_c with an initial spread (sigma_init)
+        # Broadcast expected_log_c to (n_units, n_families)
+        mu_open = expected_log_c.unsqueeze(0).expand(n_units, n_families) + torch.randn(n_units, n_families) * sigma_init
         
+        # 3. Initialize Closed-State Energies (mu_closed)
+        # Must be strictly higher (weaker binding) than the open state so Kc > Ko
+        mu_closed = mu_open + delta_shift
         
-        # Initialize around the global average concentration to ensure stable gradients at start.
-        global_avg_log_c = self.concentration_model.get_expected_log_c().mean().item()
-        self.base_energy_u = nn.Parameter(torch.ones(n_units, 1) * global_avg_log_c)
+        # Combine into interaction_mu: Shape (n_units, n_families, 2)
+        # Index 0 is open, Index 1 is closed
+        init_mu = torch.stack([mu_open, mu_closed], dim=-1)
+        self.interaction_mu = nn.Parameter(init_mu)
         
-        # Ensure Closed-State Energies are strictly weaker (higher) than open state
-        init_raw_delta = math.log(math.exp(delta_shift) - 1.0) if delta_shift > 0 else 0.0
-        self.raw_delta_shift = nn.Parameter(torch.ones(n_units, n_families) * init_raw_delta)
-        
-        # 2. Standard Deviations (uncorrelated across families for now)
+        # 4. Initialize Standard Deviations
+        # Initialize log_sigma to 0.0, meaning the standard deviations start exactly at 1.0
         self.interaction_log_sigma = nn.Parameter(torch.zeros(n_units, n_families, 2))
     
-    @property
-    def interaction_mu(self) -> torch.Tensor:
-        """
-        Dynamically computes the interaction_mu matrix from the latent space embeddings.
-        This behaves exactly like the old Parameter, making it a drop-in replacement 
-        for your other scripts.
-        Shape: (n_units, n_families, 2)
-        """
-        # A. Compute Squared Euclidean Distance: ||v_u - v_f||^2
-        diff = self.unit_latent.unsqueeze(1) - self.family_latent.unsqueeze(0)
-        dist_sq = (diff ** 2).sum(dim=-1) # Shape: (n_units, n_families)
-        
-        # B. Compute Open State Energy
-        # Equation: Expected_c + (Distance * Scale) - Base_Affinity
-        mu_open = self.base_energy_u + dist_sq
-        
-        # D. Compute Closed State Energy
-        delta = torch.nn.functional.softplus(self.raw_delta_shift)
-        mu_closed = mu_open + delta
-        
-        return torch.stack([mu_open, mu_closed], dim=-1)
-
     def sample_batch(self, batch_size: int):
         """Used in training: Samples random families."""
-        device = self.unit_latent.device
+        device = self.interaction_mu.device
         family_ids = torch.randint(0, self.n_families, (batch_size,), device=device)
         
         energies, concentrations = self._sample_from_ids(batch_size, family_ids)
@@ -220,7 +196,7 @@ class LigandEnvironment(nn.Module):
 
     def sample_specific_family(self, batch_size: int, family_id: int):
         """Samples ligands and energies for one specific family only."""
-        device = self.unit_latent.device
+        device = self.interaction_mu.device
         f_ids = torch.full((batch_size,), family_id, dtype=torch.long, device=device)
         
         # Now we can reuse the logic we already wrote!
@@ -243,7 +219,7 @@ class LigandEnvironment(nn.Module):
     @torch.no_grad()
     def get_distribution(self, family_id=None, n_points=200):
         d = self.concentration_model.get_distribution(family_id)
-        x = torch.linspace(d.mean - 3*d.stddev, d.mean + 3*d.stddev, n_points,device = self.unit_latent.device)
+        x = torch.linspace(d.mean - 3*d.stddev, d.mean + 3*d.stddev, n_points,device = self.interaction_mu.device)
         pdf = torch.exp(d.log_prob(x))
         return x.cpu().numpy(),pdf.cpu().numpy()
 

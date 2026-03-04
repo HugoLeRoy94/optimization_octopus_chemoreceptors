@@ -8,7 +8,7 @@ from .environment import (
 )
 from .physics import Receptor
 from .geometry import generate_receptor_indices
-from .analysis_helper import plot_family_summary,evaluate_model
+from .analysis_helper import plot_family_summary,evaluate_model,plot_latent_radar_chart
 from .IO import ExperimentLoader,ExperimentLogger
 
 # Exposing these allows for clean imports like:
@@ -24,4 +24,5 @@ __all__ = [
     "ExperimentLogger",
     "ExperimentLoader",
     "evaluate_model"
+    "plot_latent_radar_chart"
 ]
